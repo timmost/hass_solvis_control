@@ -7,6 +7,7 @@ Version: v2.1.3
 import logging
 import re
 import socket
+import asyncio
 
 from decimal import Decimal
 from homeassistant.core import HomeAssistant
@@ -67,7 +68,7 @@ def generate_device_info(entry: ConfigEntry, host: str, name: str) -> DeviceInfo
     model = {
         1: "Solvis Control 3",
         2: "Solvis Control 2",
-    }.get(device_version, "Solvis Control (unbekannt)")
+    }.get(device_version if device_version is not None else 0, "Solvis Control (unbekannt)")
 
     info = {
         "identifiers": {(DOMAIN, host)},
@@ -426,10 +427,57 @@ async def ensure_connected(client) -> bool:
     return True
 
 
+async def fetch_modbus_value_with_retry(
+    register,
+    register_type,
+    host: str,
+    port: int,
+    device_version: int = 0,
+    datatype="INT16",
+    order="big",
+    retries: int = 3,
+    retry_delay: float = 1.0,
+) -> int | list[int] | None:
+    """
+    Fetch one or multiple values from the Modbus device with retry logic.
+    Retries up to 'retries' times with 'retry_delay' between attempts.
+    """
+    last_error = None
+    
+    for attempt in range(retries):
+        try:
+            _LOGGER.debug(f"[fetch_modbus_value_with_retry] Attempt {attempt + 1}/{retries}")
+            return await fetch_modbus_value(
+                register,
+                register_type,
+                host,
+                port,
+                device_version,
+                datatype,
+                order,
+            )
+        except ConnectionException as e:
+            last_error = e
+            _LOGGER.debug(f"[fetch_modbus_value_with_retry] Connection error on attempt {attempt + 1}: {e}")
+            if attempt < retries - 1:
+                _LOGGER.debug(f"[fetch_modbus_value_with_retry] Waiting {retry_delay}s before retry...")
+                await asyncio.sleep(retry_delay)
+        except Exception as e:
+            last_error = e
+            _LOGGER.debug(f"[fetch_modbus_value_with_retry] Error on attempt {attempt + 1}: {e}")
+            if attempt < retries - 1:
+                await asyncio.sleep(retry_delay)
+    
+    # If all retries failed, raise the last error
+    if last_error:
+        raise last_error
+    raise ConnectionException("Failed to fetch Modbus value after all retries")
+
+
 def create_modbus_client(
     host: str,
     port: int,
-    device_version: int = None,
+    device_version: int | None = None,
     timeout: float = 2.0,
     retries: int = 1,
     reconnect_delay: float = 0.5,
