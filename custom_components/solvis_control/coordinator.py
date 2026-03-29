@@ -168,12 +168,30 @@ class SolvisModbusCoordinator(DataUpdateCoordinator):
                 raise UpdateFailed(f"[{register.name} | {register.address}] Exception during read") from err
 
             # check for error response
-            if not result or hasattr(result, "isError") and result.isError():
-                _LOGGER.error(f"[{register.name} | {register.address}] Modbus error while reading register: {result}")
-                raise UpdateFailed(f"[{register.name} | {register.address}] Modbus error while reading register")
+            if hasattr(result, "isError") and result.isError():
+                exc_code = getattr(result, "exception_code", None)
+                if exc_code == 11:  # Server Device Busy — SC2 transient, retry once
+                    _LOGGER.warning(f"[{register.name} | {register.address}] SC2 Device Busy (exception 11) — waiting 500ms and retrying")
+                    await asyncio.sleep(0.5)
+                    try:
+                        if register.register == 1:
+                            result = await self.modbus.read_input_registers(address=register.address, count=1)
+                        else:
+                            result = await self.modbus.read_holding_registers(address=register.address, count=1)
+                        if int(self.supported_version) == 2:
+                            await asyncio.sleep(0.3)
+                    except (ConnectionException, ModbusIOException, ModbusException) as retry_err:
+                        _LOGGER.warning(f"[{register.name} | {register.address}] Retry failed: {retry_err} — skipping register")
+                        continue
+                    if hasattr(result, "isError") and result.isError():
+                        _LOGGER.warning(f"[{register.name} | {register.address}] SC2 still busy after retry — skipping register")
+                        continue
+                else:
+                    _LOGGER.error(f"[{register.name} | {register.address}] Modbus error while reading register: {result}")
+                    raise UpdateFailed(f"[{register.name} | {register.address}] Modbus error while reading register")
 
             # check for invalid results
-            if not hasattr(result, "registers") or not result.registers:
+            if not result or not hasattr(result, "registers") or not result.registers:
                 _LOGGER.error(f"[{register.name} | {register.address}] Invalid Modbus response: {result}")
                 raise UpdateFailed(f"[{register.name} | {register.address}] Invalid Modbus response")
 
